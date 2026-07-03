@@ -1,0 +1,49 @@
+# Runs the whole system: the Discord clone + the music bot, already paired.
+#
+#   docker compose up --build        start everything (first run builds images)
+#   docker compose up -d             start in the background
+#   docker compose logs -f bot      watch the bot
+#   docker compose down              stop and remove containers
+#
+# Then open http://localhost:3000 and join the room "general" — the bot is
+# already in it (type /help in chat).
+#
+# Pairing without clicking: the clone boots with a pre-seeded bot credential
+# (SEED_BOT_TOKEN/SEED_BOT_ROOM below) and the bot uses the same values, so
+# no "Integrate Bot" modal round-trip is needed. Override the defaults with a
+# .env file next to this compose file or `SEED_BOT_TOKEN=... docker compose up`.
+
+services:
+  clone:
+    build: .
+    image: discord-clone
+    container_name: discord-clone
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      SEED_BOT_TOKEN: ${SEED_BOT_TOKEN:-compose-dev-token}
+      SEED_BOT_ROOM: ${SEED_BOT_ROOM:-general}
+      SEED_BOT_NAME: ${SEED_BOT_NAME:-MusicBot}
+    healthcheck:
+      # Ready once the REST API answers (wget ships with alpine's busybox).
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/rooms"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  bot:
+    build: ./music-bot
+    image: discord-music-bot
+    container_name: discord-music-bot
+    depends_on:
+      clone:
+        condition: service_healthy
+    environment:
+      # Inside the compose network the clone is reachable by service name.
+      WS_URL: ws://clone:3000/ws
+      BOT_TOKEN: ${SEED_BOT_TOKEN:-compose-dev-token}
+      ROOM_ID: ${SEED_BOT_ROOM:-general}
+      BOT_NAME: ${SEED_BOT_NAME:-MusicBot}
+    restart: unless-stopped

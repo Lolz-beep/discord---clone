@@ -30,9 +30,29 @@ interface Member {
   ws: WebSocket;
 }
 
+/** One relayed bot music frame, recorded for the monitoring API. */
+interface MusicLogEntry {
+  at: number; // server clock when it was relayed
+  action: string;
+  videoId: string;
+  title?: string;
+  positionMs: number;
+}
+
+/** One join/leave, recorded for the monitoring API. */
+interface RoomEvent {
+  at: number;
+  event: "joined" | "left";
+  userId: string;
+  displayName?: string;
+  isBot?: boolean;
+}
+
 interface Room {
   members: Map<string, Member>; // userId -> member (humans AND bots)
   history: ChatMessage[];
+  musicLog: MusicLogEntry[]; // last 100 music frames that passed through
+  eventLog: RoomEvent[]; // last 200 joins/leaves
 }
 
 /** A bot credential issued via POST /api/bots/register (pairing flow). */
@@ -53,10 +73,24 @@ const socketState = new Map<WebSocket, { roomId: string; userId: string }>();
 const registeredBots = new Map<string, BotRecord>();
 const socketBots = new Map<WebSocket, string>();
 
+// Optional pre-seeded bot credential, so docker-compose (or CI) can pair a
+// bot without the UI flow: set SEED_BOT_TOKEN (+ SEED_BOT_ROOM, SEED_BOT_NAME).
+if (process.env.SEED_BOT_TOKEN) {
+  const seeded: BotRecord = {
+    botId: "seeded-bot",
+    botName: process.env.SEED_BOT_NAME ?? "MusicBot",
+    roomId: process.env.SEED_BOT_ROOM ?? "general",
+    token: process.env.SEED_BOT_TOKEN,
+    connected: false,
+  };
+  registeredBots.set(seeded.botId, seeded);
+  console.log(`> Seeded bot credential for room "${seeded.roomId}" (botId: ${seeded.botId})`);
+}
+
 function getRoom(roomId: string): Room {
   let room = rooms.get(roomId);
   if (!room) {
-    room = { members: new Map(), history: [] };
+    room = { members: new Map(), history: [], musicLog: [], eventLog: [] };
     rooms.set(roomId, room);
   }
   return room;
@@ -103,7 +137,16 @@ function removeFromRoom(wss: WebSocketServer, ws: WebSocket) {
 
   const room = rooms.get(state.roomId);
   if (!room) return;
+  const member = room.members.get(state.userId);
   room.members.delete(state.userId);
+  room.eventLog.push({
+    at: Date.now(),
+    event: "left",
+    userId: state.userId,
+    displayName: member?.user.displayName,
+    isBot: member?.user.isBot,
+  });
+  if (room.eventLog.length > 200) room.eventLog.shift();
 
   // Tell everyone left in the room so they tear down peer connections/tiles.
   broadcast(room, {
@@ -150,6 +193,14 @@ function handleMessage(wss: WebSocketServer, ws: WebSocket, msg: ClientMessage) 
       const room = getRoom(msg.roomId);
       room.members.set(msg.user.id, { user: msg.user, ws });
       socketState.set(ws, { roomId: msg.roomId, userId: msg.user.id });
+      room.eventLog.push({
+        at: Date.now(),
+        event: "joined",
+        userId: msg.user.id,
+        displayName: msg.user.displayName,
+        isBot: msg.user.isBot,
+      });
+      if (room.eventLog.length > 200) room.eventLog.shift();
 
       // Tell the joiner who is already here. The joiner initiates WebRTC
       // offers to every non-bot user in this list (mesh topology).
@@ -227,6 +278,16 @@ function handleMessage(wss: WebSocketServer, ws: WebSocket, msg: ClientMessage) 
       const room = rooms.get(msg.roomId);
       if (!room) return;
       broadcast(room, msg, { humansOnly: true });
+      // Mirror the frame into the room's music log for the monitoring API
+      // (GET /api/rooms/:roomId/music).
+      room.musicLog.push({
+        at: Date.now(),
+        action: msg.action,
+        videoId: msg.videoId,
+        title: msg.title,
+        positionMs: msg.positionMs,
+      });
+      if (room.musicLog.length > 100) room.musicLog.shift();
       break;
     }
 
@@ -337,21 +398,85 @@ async function handleApi(
     return true;
   }
 
-  // GET /api/bots/:botId/status | DELETE /api/bots/:botId
-  const botMatch = pathname.match(/^\/api\/bots\/([^/]+)(\/status)?$/);
-  if (botMatch) {
-    const bot = registeredBots.get(botMatch[1]);
-    if (method === "GET" && botMatch[2] === "/status") {
-      if (!bot) {
-        json(res, 404, { error: "unknown botId" });
+  // GET /api/bots -> every registered bot with its live status (monitoring).
+  if (pathname === "/api/bots" && method === "GET") {
+    json(res, 200, {
+      bots: [...registeredBots.values()].map(({ ws: _ws, ...bot }) => bot),
+    });
+    return true;
+  }
+
+  // GET /api/rooms/:roomId/(members|messages|music|events)
+  // Read-only monitoring: the REST API never changes room state — all the
+  // real action happens over the WebSocket. These let tools like Postman
+  // watch what's going on.
+  const roomMonitor = pathname.match(
+    /^\/api\/rooms\/([^/]+)\/(members|messages|music|events)$/
+  );
+  if (roomMonitor && method === "GET") {
+    const roomId = decodeURIComponent(roomMonitor[1]);
+    const room = rooms.get(roomId);
+    if (!room) {
+      json(res, 404, { error: `room "${roomId}" does not exist` });
+      return true;
+    }
+    switch (roomMonitor[2]) {
+      case "members":
+        json(res, 200, {
+          roomId,
+          members: [...room.members.values()].map((m) => m.user),
+        });
+        return true;
+      case "messages":
+        json(res, 200, { roomId, count: room.history.length, messages: room.history });
+        return true;
+      case "music": {
+        // Playback state as observed by the server (the bot's music frames
+        // pass through here, so this is an accurate mirror).
+        const lastTrack = [...room.musicLog].reverse().find((e) => e.action !== "seek");
+        const nowPlaying =
+          lastTrack && lastTrack.action !== "stop"
+            ? {
+                videoId: lastTrack.videoId,
+                title: lastTrack.title ?? null,
+                state: lastTrack.action === "pause" ? "paused" : "playing",
+                since: lastTrack.at,
+              }
+            : null;
+        json(res, 200, { roomId, nowPlaying, log: room.musicLog });
         return true;
       }
-      json(res, 200, { botId: bot.botId, botName: bot.botName, connected: bot.connected });
+      case "events":
+        json(res, 200, { roomId, events: room.eventLog });
+        return true;
+    }
+  }
+
+  // GET /api/bots/:idOrToken/status | DELETE /api/bots/:idOrToken
+  // Accepts EITHER the botId or the token — you already know your own token
+  // (it's in the bot's .env), so no need to remember a separate id.
+  const botMatch = pathname.match(/^\/api\/bots\/([^/]+)(\/status)?$/);
+  if (botMatch) {
+    const key = decodeURIComponent(botMatch[1]);
+    const bot =
+      registeredBots.get(key) ??
+      [...registeredBots.values()].find((b) => b.token === key);
+    if (method === "GET" && botMatch[2] === "/status") {
+      if (!bot) {
+        json(res, 404, { error: "unknown bot (looked up by id and by token)" });
+        return true;
+      }
+      json(res, 200, {
+        botId: bot.botId,
+        botName: bot.botName,
+        roomId: bot.roomId,
+        connected: bot.connected,
+      });
       return true;
     }
     if (method === "DELETE" && !botMatch[2]) {
       if (!bot) {
-        json(res, 404, { error: "unknown botId" });
+        json(res, 404, { error: "unknown bot (looked up by id and by token)" });
         return true;
       }
       registeredBots.delete(bot.botId);

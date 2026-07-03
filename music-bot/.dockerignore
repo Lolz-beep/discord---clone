@@ -1,0 +1,11 @@
+node_modules
+*.tsbuildinfo
+
+# never bake credentials into the image — pass them as env vars
+.env
+.env.*
+
+Dockerfile
+.dockerignore
+.gitignore
+*.md

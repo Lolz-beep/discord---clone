@@ -22,6 +22,25 @@ npm run build
 npm start            # runs server.ts with NODE_ENV-equivalent prod mode (--prod)
 ```
 
+### Run with Docker (clone + bot together)
+
+```bash
+docker compose up --build
+```
+
+Builds two images ([Dockerfile](Dockerfile) for the clone,
+[music-bot/Dockerfile](music-bot/Dockerfile) for the bot) and starts both
+containers, **already paired**: the clone boots with a pre-seeded bot
+credential (env `SEED_BOT_TOKEN` / `SEED_BOT_ROOM` / `SEED_BOT_NAME`, see
+[docker-compose.yml](docker-compose.yml)) and the bot connects with the same
+token, so no "Integrate Bot" clicking is needed. Open
+`http://localhost:3000`, join `general`, type `/help`. Stop with
+`docker compose down`. Override defaults via a `.env` file next to the
+compose file (e.g. `SEED_BOT_TOKEN=my-secret`, `PORT=8080`).
+
+The seeded credential also works outside Docker: start the server with
+`SEED_BOT_TOKEN` set and a bot can join with that token immediately.
+
 Everything runs in **one process**: `server.ts` starts the Next.js request
 handler and attaches the WebSocket server at `ws://<host>/ws`. There is no
 separate socket process. (Next.js API routes don't hold long-lived sockets
@@ -117,9 +136,19 @@ it credentials, you start it yourself, and the clone confirms it connected.
 | Endpoint | Method | Body / Response |
 | --- | --- | --- |
 | `/api/bots/register` | POST | body `{ roomId, botName }` → `201 { botId, token, wsUrl, roomId }`. Creates a pending bot record (`connected: false`); `token` is a random UUID. |
-| `/api/bots/:botId/status` | GET | `{ botId, botName, connected }` — the modal polls this. |
-| `/api/bots/:botId` | DELETE | Revokes the registration; a connected bot's socket is closed (code `4002`). |
+| `/api/bots/:idOrToken/status` | GET | `{ botId, botName, roomId, connected }` — accepts the botId **or the token** (you already know your own token). The modal polls this. |
+| `/api/bots/:idOrToken` | DELETE | Revokes the registration (by id or token); a connected bot's socket is closed (code `4002`). |
+| `/api/bots` | GET | Monitoring: every registered bot with its room, token and live `connected` flag. |
 | `/api/rooms` | GET | `{ rooms: [{ name, count }] }` — active rooms for the modal's dropdown. |
+| `/api/rooms/:roomId/members` | GET | Monitoring: who's in the room right now (bots flagged `isBot`). |
+| `/api/rooms/:roomId/messages` | GET | Monitoring: the room's chat history (last 500). |
+| `/api/rooms/:roomId/events` | GET | Monitoring: join/leave log with timestamps (last 200). |
+| `/api/rooms/:roomId/music` | GET | Monitoring: `nowPlaying` (current track, `playing`/`paused`, `null` when idle) + the log of every music frame the bot broadcast (last 100). |
+
+The REST API is **read-only monitoring** (plus the pairing endpoints above) —
+it never drives chat or playback; that all happens over the WebSocket. A
+ready-to-import Postman collection + environment lives in
+[postman/](postman/) (see [postman/README.md](postman/README.md)).
 
 ### What the bot must do
 

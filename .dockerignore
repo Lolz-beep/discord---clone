@@ -1,0 +1,22 @@
+# dependencies + build output (rebuilt inside the image)
+node_modules
+.next
+*.tsbuildinfo
+next-env.d.ts
+
+# the bot is its own image (music-bot/Dockerfile) — keep it out of this one
+music-bot
+
+# local config / secrets
+.env
+.env.*
+
+# docker files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# repo noise
+.git
+.gitignore
+*.md
