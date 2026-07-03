@@ -7,14 +7,12 @@ export default function TopBar({
   roomId,
   connected,
   nowPlaying,
-  musicBlocked,
-  onEnableMusic,
+  onIntegrateBot,
 }: {
   roomId: string | null;
   connected: boolean;
   nowPlaying: NowPlayingInfo | null;
-  musicBlocked: boolean;
-  onEnableMusic: () => void;
+  onIntegrateBot: () => void;
 }) {
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-[#26272b] bg-[#313338] px-4 shadow-sm">
@@ -22,21 +20,24 @@ export default function TopBar({
       <h1 className="truncate font-semibold text-white">{roomId ?? "no room"}</h1>
 
       <div className="ml-auto flex items-center gap-3">
-        {nowPlaying && (
+        {roomId && (
           <button
-            onClick={musicBlocked ? onEnableMusic : undefined}
-            className={`flex max-w-64 items-center gap-2 rounded-full bg-[#1e1f22] px-3 py-1 text-xs ${
-              musicBlocked ? "cursor-pointer ring-1 ring-amber-500" : "cursor-default"
-            }`}
-            title={musicBlocked ? "Click to allow audio playback" : "Now playing"}
+            onClick={onIntegrateBot}
+            className="rounded bg-[#3a3c42] px-3 py-1 text-xs font-medium text-gray-200 transition hover:bg-[#45474e]"
+            title="Pair an external bot with this room"
+          >
+            🤖 Integrate Bot
+          </button>
+        )}
+        {nowPlaying && (
+          <div
+            className="flex max-w-64 items-center gap-2 rounded-full bg-[#1e1f22] px-3 py-1 text-xs"
+            title="Now playing"
           >
             <span className={nowPlaying.playing ? "animate-pulse" : ""}>🎵</span>
-            <span className="truncate text-gray-300">
-              {musicBlocked ? "Click to play: " : ""}
-              {nowPlaying.title}
-            </span>
+            <span className="truncate text-gray-300">{nowPlaying.title}</span>
             {!nowPlaying.playing && <span className="text-gray-500">(paused)</span>}
-          </button>
+          </div>
         )}
 
         <div className="flex items-center gap-1.5 text-xs text-gray-400">

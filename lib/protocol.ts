@@ -23,9 +23,21 @@ export interface MusicEvent {
   type: "music";
   roomId: string;
   action: string; // "play" | "pause" | "resume" | "stop" | "seek" — relayed, not interpreted
-  track: { url: string; title?: string; [key: string]: unknown };
+  videoId: string; // YouTube video id; human clients play it via the IFrame Player API
+  title?: string; // optional extra from the bot, used for the Now Playing chip
   positionMs: number;
   serverTimestamp: number; // bot's clock at send time, used for rough client sync
+}
+
+/**
+ * Human client -> server -> bots: the room's current video finished playing.
+ * The bot uses this (not its own timers) to auto-advance its queue.
+ */
+export interface MusicClientEvent {
+  type: "musicEvent";
+  roomId: string;
+  event: "ended";
+  videoId: string;
 }
 
 /** Per-user media flags so other clients can render mute icons / avatar tiles. */
@@ -49,7 +61,8 @@ export type ClientMessage =
       payload: unknown;
     }
   | ({ type: "media"; roomId: string; userId: string } & MediaState)
-  | MusicEvent;
+  | MusicEvent
+  | MusicClientEvent;
 
 /** Messages the server sends to clients. */
 export type ServerMessage =
@@ -74,4 +87,5 @@ export type ServerMessage =
   | ({ type: "media"; roomId: string; userId: string } & MediaState)
   | { type: "rooms"; rooms: { name: string; count: number }[] }
   | MusicEvent
+  | MusicClientEvent // delivered to bots only
   | { type: "error"; message: string };

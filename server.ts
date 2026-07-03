@@ -9,7 +9,8 @@
  *
  * Run: `npm run dev` (development) or `npm run build && npm start` (production).
  */
-import { createServer } from "http";
+import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { randomUUID } from "crypto";
 import { parse } from "url";
 import next from "next";
 import { WebSocketServer, WebSocket } from "ws";
@@ -34,10 +35,23 @@ interface Room {
   history: ChatMessage[];
 }
 
+/** A bot credential issued via POST /api/bots/register (pairing flow). */
+interface BotRecord {
+  botId: string;
+  botName: string;
+  roomId: string;
+  token: string;
+  connected: boolean;
+  ws?: WebSocket;
+}
+
 // All state is in-memory; it lives for the lifetime of the server process.
 const rooms = new Map<string, Room>();
 // Which room/user a given socket belongs to, so we can clean up on disconnect.
 const socketState = new Map<WebSocket, { roomId: string; userId: string }>();
+// Registered bots (botId -> record) and which socket belongs to which bot.
+const registeredBots = new Map<string, BotRecord>();
+const socketBots = new Map<WebSocket, string>();
 
 function getRoom(roomId: string): Room {
   let room = rooms.get(roomId);
@@ -104,12 +118,29 @@ function removeFromRoom(wss: WebSocketServer, ws: WebSocket) {
 function handleMessage(wss: WebSocketServer, ws: WebSocket, msg: ClientMessage) {
   switch (msg.type) {
     case "join": {
-      // Bot handshake: any client with isBot:true must present a non-empty
-      // token. For this prototype ANY non-empty token is accepted.
-      if (msg.user.isBot && !(typeof msg.token === "string" && msg.token.length > 0)) {
-        send(ws, { type: "error", message: "Bots must provide a non-empty token" });
-        ws.close(4001, "missing bot token");
-        return;
+      // Bot handshake: a client with isBot:true must present a token issued
+      // by POST /api/bots/register. Unknown/missing tokens are rejected, and
+      // the token is only valid for the room it was registered for.
+      if (msg.user.isBot) {
+        const bot = [...registeredBots.values()].find((b) => b.token === msg.token);
+        if (!bot) {
+          send(ws, { type: "error", message: "Invalid or unknown bot token" });
+          ws.close(4001, "invalid bot token");
+          return;
+        }
+        if (bot.roomId !== msg.roomId) {
+          send(ws, {
+            type: "error",
+            message: `Token is registered for room "${bot.roomId}", not "${msg.roomId}"`,
+          });
+          ws.close(4003, "wrong room for bot token");
+          return;
+        }
+        // Pairing complete: the setup modal polls /api/bots/:botId/status
+        // and flips to "Connected" off this flag.
+        bot.connected = true;
+        bot.ws = ws;
+        socketBots.set(ws, bot.botId);
       }
 
       // A socket can only be in one room at a time; switching rooms implies
@@ -198,7 +229,145 @@ function handleMessage(wss: WebSocketServer, ws: WebSocket, msg: ClientMessage) 
       broadcast(room, msg, { humansOnly: true });
       break;
     }
+
+    case "musicEvent": {
+      // Human clients report end-of-track; relay to the room's bots so the
+      // bot (the source of truth) can auto-advance its queue. Bots may get
+      // one report per human — deduping is the bot's job.
+      const state = socketState.get(ws);
+      const sender = state && rooms.get(state.roomId)?.members.get(state.userId);
+      if (!sender || sender.user.isBot) return; // only humans report playback
+      const room = rooms.get(msg.roomId);
+      if (!room) return;
+      for (const member of room.members.values()) {
+        if (member.user.isBot) send(member.ws, msg);
+      }
+      break;
+    }
   }
+}
+
+// ---------------------------------------------------------------------------
+// REST API for the bot pairing flow (issue credentials -> user starts their
+// separate bot process -> the setup modal polls until it connects).
+// ---------------------------------------------------------------------------
+
+function json(res: ServerResponse, status: number, body: unknown) {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+
+function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => {
+      data += chunk;
+      if (data.length > 64 * 1024) {
+        reject(new Error("body too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+/** Handles /api/* routes. Returns false if the path isn't ours. */
+async function handleApi(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string
+): Promise<boolean> {
+  const method = req.method ?? "GET";
+
+  // POST /api/bots/register -> issue credentials for a new (pending) bot.
+  if (pathname === "/api/bots/register" && method === "POST") {
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      json(res, 400, { error: "invalid JSON body" });
+      return true;
+    }
+    const roomId = typeof body.roomId === "string" ? body.roomId.trim() : "";
+    const botName =
+      typeof body.botName === "string" && body.botName.trim()
+        ? body.botName.trim()
+        : "MusicBot";
+    if (!roomId) {
+      json(res, 400, { error: "roomId is required" });
+      return true;
+    }
+    const bot: BotRecord = {
+      botId: randomUUID(),
+      botName,
+      roomId,
+      token: randomUUID(),
+      connected: false,
+    };
+    registeredBots.set(bot.botId, bot);
+    // Derive the ws URL from how this request reached us, so it works through
+    // tunnels (ngrok/cloudflared) too.
+    const proto =
+      (req.headers["x-forwarded-proto"] as string) === "https" ? "wss" : "ws";
+    const host = req.headers.host ?? `localhost:${port}`;
+    json(res, 201, {
+      botId: bot.botId,
+      token: bot.token,
+      wsUrl: `${proto}://${host}/ws`,
+      roomId: bot.roomId,
+    });
+    return true;
+  }
+
+  // GET /api/rooms -> active rooms (for the modal's room dropdown).
+  if (pathname === "/api/rooms" && method === "GET") {
+    json(res, 200, {
+      rooms: [...rooms.entries()].map(([name, room]) => ({
+        name,
+        count: [...room.members.values()].filter((m) => !m.user.isBot).length,
+      })),
+    });
+    return true;
+  }
+
+  // GET /api/bots/:botId/status | DELETE /api/bots/:botId
+  const botMatch = pathname.match(/^\/api\/bots\/([^/]+)(\/status)?$/);
+  if (botMatch) {
+    const bot = registeredBots.get(botMatch[1]);
+    if (method === "GET" && botMatch[2] === "/status") {
+      if (!bot) {
+        json(res, 404, { error: "unknown botId" });
+        return true;
+      }
+      json(res, 200, { botId: bot.botId, botName: bot.botName, connected: bot.connected });
+      return true;
+    }
+    if (method === "DELETE" && !botMatch[2]) {
+      if (!bot) {
+        json(res, 404, { error: "unknown botId" });
+        return true;
+      }
+      registeredBots.delete(bot.botId);
+      // Revoking a connected bot kicks its socket; the close handler then
+      // removes it from its room and notifies members.
+      bot.ws?.close(4002, "bot revoked");
+      json(res, 200, { ok: true });
+      return true;
+    }
+  }
+
+  if (pathname.startsWith("/api/")) {
+    json(res, 404, { error: "not found" });
+    return true;
+  }
+  return false;
 }
 
 const app = next({ dev });
@@ -208,8 +377,16 @@ app.prepare().then(() => {
   // Must be obtained after prepare(); routes non-/ws upgrades (Next HMR) to Next.
   const handleUpgrade = app.getUpgradeHandler();
 
-  const server = createServer((req, res) => {
-    handle(req, res, parse(req.url ?? "/", true));
+  const server = createServer(async (req, res) => {
+    const parsedUrl = parse(req.url ?? "/", true);
+    try {
+      if (await handleApi(req, res, parsedUrl.pathname ?? "/")) return;
+    } catch (err) {
+      console.error("api error", err);
+      if (!res.headersSent) json(res, 500, { error: "internal error" });
+      return;
+    }
+    handle(req, res, parsedUrl);
   });
 
   const wss = new WebSocketServer({ noServer: true });
@@ -244,8 +421,34 @@ app.prepare().then(() => {
       }
     });
 
-    ws.on("close", () => removeFromRoom(wss, ws));
-    ws.on("error", () => removeFromRoom(wss, ws));
+    const cleanup = () => {
+      removeFromRoom(wss, ws);
+      // If this socket was a paired bot, mark it disconnected so the status
+      // endpoint (and any open setup modal) reflects reality.
+      const botId = socketBots.get(ws);
+      if (botId) {
+        socketBots.delete(ws);
+        const bot = registeredBots.get(botId);
+        if (bot) {
+          bot.connected = false;
+          bot.ws = undefined;
+        }
+      }
+    };
+    ws.on("close", cleanup);
+    ws.on("error", cleanup);
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(
+        `Port ${port} is already in use — another instance of this server ` +
+          `(npm run dev / npm start) is probably still running.\n` +
+          `Stop it, or run on another port:  $env:PORT = "3001"; npm run dev`
+      );
+      process.exit(1);
+    }
+    throw err;
   });
 
   server.listen(port, () => {

@@ -23,6 +23,8 @@ import ChatPanel from "./ChatPanel";
 import VideoGrid, { type TileData } from "./VideoGrid";
 import ControlBar from "./ControlBar";
 import NameGate from "./NameGate";
+import BotModal, { type BotRegistration } from "./BotModal";
+import YouTubePlayer, { type MusicCommand } from "./YouTubePlayer";
 
 export interface PeerInfo {
   user: User;
@@ -60,10 +62,15 @@ export default function AppShell() {
   const camStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
 
-  // ---- bot music player -----------------------------------------------------
-  const musicAudioRef = useRef<HTMLAudioElement | null>(null);
+  // ---- bot music player (YouTube IFrame, driven by `music` events) ----------
+  const [ytCommand, setYtCommand] = useState<MusicCommand | null>(null);
+  const musicSeqRef = useRef(0);
   const [nowPlaying, setNowPlaying] = useState<NowPlayingInfo | null>(null);
-  const [musicBlocked, setMusicBlocked] = useState(false); // autoplay was denied
+
+  // ---- bot pairing modal ------------------------------------------------------
+  const [botModalOpen, setBotModalOpen] = useState(false);
+  // Survives closing the modal, so the user can reopen and resume pairing.
+  const [botRegistration, setBotRegistration] = useState<BotRegistration | null>(null);
 
   const meRef = useRef<User | null>(null);
   meRef.current = me;
@@ -84,50 +91,32 @@ export default function AppShell() {
     [sendMsg]
   );
 
-  // ---- bot music: obey incoming events, HTML5 Audio does the playback -------
+  // ---- bot music: forward each event to the YouTube player, track the chip --
+  // The clone does not interpret bot logic; it just obeys play/pause/resume/
+  // seek/stop and keeps a small Now Playing indicator in sync.
   const applyMusic = useCallback((msg: MusicEvent) => {
-    const audio = musicAudioRef.current;
-    if (!audio) return;
-    // Rough cross-client sync: the bot tells us where the track was
-    // (positionMs) at serverTimestamp; add elapsed transit time.
-    const targetSec = () =>
-      Math.max(0, (msg.positionMs + (Date.now() - msg.serverTimestamp)) / 1000);
-    const title = msg.track?.title ?? msg.track?.url ?? "unknown track";
-
-    const tryPlay = () =>
-      audio
-        .play()
-        .then(() => setMusicBlocked(false))
-        .catch(() => setMusicBlocked(true)); // autoplay policy — needs a click
-
+    setYtCommand({
+      seq: ++musicSeqRef.current,
+      action: msg.action,
+      videoId: msg.videoId,
+      positionMs: msg.positionMs,
+      serverTimestamp: msg.serverTimestamp,
+    });
+    const title = msg.title ?? msg.videoId;
     switch (msg.action) {
       case "play":
-        audio.src = msg.track.url;
-        audio.addEventListener("loadedmetadata", () => (audio.currentTime = targetSec()), {
-          once: true,
-        });
-        tryPlay();
         setNowPlaying({ title, playing: true });
         break;
       case "resume":
-        audio.currentTime = targetSec();
-        tryPlay();
-        setNowPlaying({ title, playing: true });
+        setNowPlaying((np) => ({ title: np?.title ?? title, playing: true }));
         break;
       case "pause":
-        audio.pause();
-        setNowPlaying((np) => (np ? { ...np, playing: false } : { title, playing: false }));
-        break;
-      case "seek":
-        audio.currentTime = targetSec();
+        setNowPlaying((np) => ({ title: np?.title ?? title, playing: false }));
         break;
       case "stop":
-        audio.pause();
-        audio.removeAttribute("src");
         setNowPlaying(null);
         break;
       default:
-        // Unknown actions are ignored — the clone does not interpret bot logic.
         break;
     }
   }, []);
@@ -488,13 +477,7 @@ export default function AppShell() {
           roomId={roomId}
           connected={connected}
           nowPlaying={nowPlaying}
-          musicBlocked={musicBlocked}
-          onEnableMusic={() => {
-            musicAudioRef.current
-              ?.play()
-              .then(() => setMusicBlocked(false))
-              .catch(() => {});
-          }}
+          onIntegrateBot={() => setBotModalOpen(true)}
         />
 
         {roomId ? (
@@ -529,7 +512,25 @@ export default function AppShell() {
             <PeerAudio key={peer.user.id} stream={peer.media.mic} />
           )
       )}
-      <audio ref={musicAudioRef} className="hidden" />
+      {/* Bot-driven YouTube playback panel; reports "ended" back to the bot. */}
+      <YouTubePlayer
+        command={ytCommand}
+        visible={nowPlaying !== null}
+        onEnded={(videoId) => {
+          const room = roomIdRef.current;
+          if (room) sendMsg({ type: "musicEvent", roomId: room, event: "ended", videoId });
+        }}
+      />
+
+      {botModalOpen && roomId && (
+        <BotModal
+          currentRoom={roomId}
+          registration={botRegistration}
+          onRegistered={setBotRegistration}
+          onCancelled={() => setBotRegistration(null)}
+          onClose={() => setBotModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
