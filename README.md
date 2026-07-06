@@ -5,6 +5,8 @@ rooms. Next.js (App Router, TypeScript) + Tailwind, one custom `ws` WebSocket
 server, peer-to-peer WebRTC mesh (STUN only). A YouTube music bot lives in
 [music-bot/](music-bot/) as its own project.
 
+# IF YOU WANT TO CLONE THIS DISCORD CLONE, PLEASE CHANGE THE FOLDER NAME TO "discord - clone", THE FOLDER GOT MISSNAMED WHEN COMMITED. THANK YOU
+
 ## Run
 
 ```bash
