@@ -26,7 +26,7 @@ export default function NameGate({ onSubmit }: { onSubmit: (name: string) => voi
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="e.g. Ada"
+          placeholder="Enter your display name"
           maxLength={32}
           className="mt-2 w-full rounded bg-[#1e1f22] px-3 py-2 text-gray-100 outline-none ring-1 ring-transparent placeholder:text-gray-500 focus:ring-indigo-500"
         />

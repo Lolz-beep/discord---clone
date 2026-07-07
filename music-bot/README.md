@@ -68,7 +68,7 @@ Incoming chat (the bot acts only on texts starting with `/`):
 
 ```json
 { "type": "chat", "roomId": "general",
-  "user": { "id": "u1", "displayName": "Ada" },
+  "user": { "id": "u1", "displayName": "Enter your display name" },
   "text": "/play https://youtu.be/dQw4w9WgXcQ", "timestamp": 1719990000000 }
 ```
 
